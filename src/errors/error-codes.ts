@@ -1,0 +1,14 @@
+
+export const UploadErrorCode = {
+  INVALID_FILE: "INVALID_FILE",
+  FILE_TOO_LARGE: "FILE_TOO_LARGE",
+  UNSUPPORTED_FILE_TYPE: "UNSUPPORTED_FILE_TYPE",
+  VALIDATION_ERROR: "VALIDATION_ERROR",
+  STREAM_ERROR: "STREAM_ERROR",
+  STORAGE_ERROR: "STORAGE_ERROR",
+  UPLOAD_ABORTED: "UPLOAD_ABORTED",
+  INTERNAL_ERROR: "INTERNAL_ERROR",
+} as const;
+
+export type UploadErrorCode =
+  (typeof UploadErrorCode)[keyof typeof UploadErrorCode];
