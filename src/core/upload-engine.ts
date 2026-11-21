@@ -23,7 +23,7 @@ function createAbortError(): UploadError {
 }
 
 export class UploadEngine {
-    constructor(private readonly config: UploadConfig) { }
+    constructor(private readonly config: UploadConfig) {}
 
     async upload(input: UploadInput): Promise<UploadResult> {
         const id = randomUUID();
@@ -34,6 +34,7 @@ export class UploadEngine {
         let sourceEnded = false;
         let pendingChunk: Buffer | undefined;
         let validatedStream: Readable | undefined;
+        let storedKey: string | undefined;
 
         const signal = input.signal;
         const abortError = createAbortError();
@@ -200,6 +201,9 @@ export class UploadEngine {
                 signal,
             });
 
+            // Track the stored file immediately after storage succeeds.
+            storedKey = storedFile.key;
+
             if (signal?.aborted) {
                 throw abortError;
             }
@@ -231,7 +235,21 @@ export class UploadEngine {
                 }
             }
 
+            // Clean up a file that was stored before the abort.
             if (signal?.aborted) {
+                if (storedKey) {
+                    try {
+                        await this.config.storage.delete(storedKey);
+                        storedKey = undefined;
+                    } catch (cleanupError) {
+                        throw new UploadError({
+                            code: UploadErrorCode.UPLOAD_ABORTED,
+                            message: "Upload was aborted, but stored file cleanup failed",
+                            cause: cleanupError,
+                        });
+                    }
+                }
+
                 throw abortError;
             }
 

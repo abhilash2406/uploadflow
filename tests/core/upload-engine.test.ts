@@ -8,6 +8,7 @@ import { Readable } from "node:stream";
 import { UploadEngine } from "../../src/core/upload-engine.js";
 import { LocalStorageAdapter } from "../../src/storage/local-storage.js";
 import { UploadErrorCode } from "../../src/errors/error-codes.js";
+import type { StorageAdapter } from "../../src/types/storage.js";
 
 describe("UploadEngine", () => {
     let directory: string;
@@ -201,6 +202,45 @@ describe("UploadEngine", () => {
             code: UploadErrorCode.UPLOAD_ABORTED,
         });
 
+        expect(await readdir(directory)).toHaveLength(0);
+    });
+
+    it("should delete the stored file when aborted immediately after storage succeeds", async () => {
+        const controller = new AbortController();
+
+        const localStorage = new LocalStorageAdapter({ directory });
+
+        const abortingStorage: StorageAdapter = {
+            upload: async (options) => {
+                // First, complete the actual storage operation.
+                const result = await localStorage.upload(options);
+
+                // Abort immediately after storage succeeds.
+                controller.abort();
+
+                return result;
+            },
+
+            delete: (key) => localStorage.delete(key),
+        };
+
+        const raceEngine = new UploadEngine({
+            maxFileSize: 1024 * 1024,
+            allowedMimeTypes: ["image/jpeg"],
+            storage: abortingStorage,
+        });
+
+        await expect(
+            raceEngine.upload({
+                filename: "race-condition.jpg",
+                stream: Readable.from([jpeg]),
+                signal: controller.signal,
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.UPLOAD_ABORTED,
+        });
+
+        // The file must not remain in storage.
         expect(await readdir(directory)).toHaveLength(0);
     });
 
