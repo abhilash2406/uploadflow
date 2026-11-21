@@ -71,7 +71,7 @@ export class LocalStorageAdapter implements StorageAdapter {
             await mkdir(dirname(filePath), { recursive: true });
 
             // 2. Create the destination file without overwriting.
-            output = createWriteStream(filePath, { flags: "wx" });
+            output = this.createOutputStream(filePath);
 
             output.once("open", () => {
                 fileCreated = true;
@@ -129,6 +129,16 @@ export class LocalStorageAdapter implements StorageAdapter {
         } finally {
             stream.removeListener("error", handleSourceError);
         }
+    }
+
+    /**
+     * Creates the destination write stream.
+     * Protected so tests can simulate destination failures.
+     */
+    protected createOutputStream(
+        filePath: string,
+    ): ReturnType<typeof createWriteStream> {
+        return createWriteStream(filePath, { flags: "wx" });
     }
 
     async delete(key: string): Promise<void> {

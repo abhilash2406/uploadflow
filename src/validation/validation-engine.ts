@@ -2,7 +2,7 @@
 import { detectFileType } from "./file-detector.js";
 import { validateMimeType } from "./mime-validator.js";
 
-import type { DetectedFile } from "./file-detector.js";
+import type { DetectedFile } from "../types/validation.js";
 import { UploadError } from "../errors/upload-error.js";
 import { UploadErrorCode } from "../errors/error-codes.js";
 

@@ -1,11 +1,5 @@
-
-
 import { fileTypeFromBuffer } from "file-type";
-
-export interface DetectedFile {
-    mimeType: string;
-    extension: string;
-}
+import type { DetectedFile } from "../types/validation.js";
 
 export async function detectFileType(
     buffer: Buffer,

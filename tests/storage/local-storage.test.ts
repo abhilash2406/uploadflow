@@ -5,8 +5,10 @@ import {
     describe,
     expect,
     it,
+    vi,
 } from "vitest";
 
+import { createWriteStream } from "node:fs";
 import {
     mkdtemp,
     readFile,
@@ -17,11 +19,27 @@ import {
 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 
 import { LocalStorageAdapter } from "../../src/storage/local-storage.js";
 import { UploadError } from "../../src/errors/index.js";
 import { UploadErrorCode } from "../../src/errors/error-codes.js";
+
+class FailingWriteStorageAdapter extends LocalStorageAdapter {
+    protected override createOutputStream(filePath: string) {
+        const output = createWriteStream(filePath, { flags: "wx" });
+
+        output.once("open", () => {
+            setImmediate(() => {
+                output.destroy(
+                    new Error("Simulated destination write failure"),
+                );
+            });
+        });
+
+        return output;
+    }
+}
 
 describe("LocalStorageAdapter", () => {
     let directory: string;
@@ -152,27 +170,30 @@ describe("LocalStorageAdapter", () => {
 
     it("should remove a partially written file when the stream fails after writing data", async () => {
         const key = "partial-failure.txt";
+        const filePath = join(directory, key);
 
-        const failingStream = new Readable({
-            read() {
-                this.push(Buffer.alloc(1024 * 1024, "a"));
-                this.destroy(new Error("Simulated failure after data"));
-            },
+        const source = new PassThrough();
+
+        const uploadPromise = storage.upload({
+            key,
+            stream: source,
+            contentType: "text/plain",
         });
 
-        await expect(
-            storage.upload({
-                key,
-                stream: failingStream,
-                contentType: "text/plain",
-            }),
-        ).rejects.toMatchObject({
+        source.write(Buffer.alloc(1024 * 1024, "a"));
+
+        await vi.waitFor(async () => {
+            const fileStat = await stat(filePath);
+            expect(fileStat.size).toBeGreaterThan(0);
+        });
+
+        source.destroy(new Error("Simulated failure after writing data"));
+
+        await expect(uploadPromise).rejects.toMatchObject({
             code: UploadErrorCode.STREAM_ERROR,
         });
 
-        await expect(
-            stat(join(directory, key)),
-        ).rejects.toMatchObject({
+        await expect(stat(filePath)).rejects.toMatchObject({
             code: "ENOENT",
         });
     });
@@ -233,5 +254,32 @@ describe("LocalStorageAdapter", () => {
         );
 
         expect(content).toBe("existing content");
+    });
+
+    // Test B: Destination fails after the file has opened.
+    it("should clean up a file when destination writing fails after opening", async () => {
+        const key = "destination-failure.txt";
+
+        const failingStorage = new FailingWriteStorageAdapter({
+            directory,
+        });
+
+        await expect(
+            failingStorage.upload({
+                key,
+                stream: Readable.from([
+                    Buffer.alloc(1024 * 1024, "a"),
+                ]),
+                contentType: "text/plain",
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.STORAGE_ERROR,
+        });
+
+        await expect(
+            stat(join(directory, key)),
+        ).rejects.toMatchObject({
+            code: "ENOENT",
+        });
     });
 });
