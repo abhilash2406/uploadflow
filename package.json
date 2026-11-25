@@ -3,13 +3,21 @@
   "version": "0.1.0",
   "description": "A streaming-first secure file ingestion pipeline for Node.js",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/abhilash2406/uploadflow.git"
+  },
+  "homepage": "https://github.com/abhilash2406/uploadflow#readme",
+  "bugs": {
+    "url": "https://github.com/abhilash2406/uploadflow/issues"
+  },
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
     }
   },
   "files": [
@@ -35,7 +43,10 @@
     "streaming",
     "file-security",
     "nodejs",
-    "typescript"
+    "typescript",
+    "file-validation",
+    "upload-middleware",
+    "storage-adapter"
   ],
   "packageManager": "pnpm@12.21.0",
   "dependencies": {
