@@ -14,9 +14,7 @@ import {
     DeleteObjectCommand,
 } from "@aws-sdk/client-s3";
 
-
 import { UploadErrorCode } from "../../src/errors/index.js";
-
 import { S3StorageAdapter } from "../../src/storage/s3-storage.js";
 
 const mocks = vi.hoisted(() => ({
@@ -109,7 +107,6 @@ describe("S3StorageAdapter", () => {
         });
     });
 
-
     describe("validation", () => {
         it("should reject an empty bucket name", () => {
             expect(() => {
@@ -170,29 +167,48 @@ describe("S3StorageAdapter", () => {
     });
 
     describe("error handling", () => {
-        it("should map S3 upload failures to STORAGE_ERROR", async () => {
-            mocks.upload.mockRejectedValueOnce(
-                new Error("S3 service unavailable"),
-            );
+        it("should map S3 upload failures to STORAGE_ERROR and destroy the source stream", async () => {
+            const stream = new PassThrough();
+            let uploadOptions: any;
+
+            mocks.upload.mockImplementationOnce(async (options: any) => {
+                uploadOptions = options;
+                throw new Error("S3 service unavailable");
+            });
 
             await expect(
                 adapter.upload({
                     key: "documents/test.txt",
-                    stream: Readable.from(["Hello"]),
+                    stream,
                     contentType: "text/plain",
                 }),
             ).rejects.toMatchObject({
                 code: UploadErrorCode.STORAGE_ERROR,
             });
+
+            expect(uploadOptions.abortController.signal.aborted).toBe(true);
+            expect(stream.destroyed).toBe(true);
         });
 
-        it("should map source stream failures to STREAM_ERROR", async () => {
+        it("should map source stream failures to STREAM_ERROR and abort the S3 upload", async () => {
             const failingStream = Readable.from(
                 (async function* () {
                     yield Buffer.from("Hello");
                     throw new Error("Source stream failed");
                 })(),
             );
+
+            let uploadOptions: any;
+
+            mocks.upload.mockImplementationOnce(async (options: any) => {
+                uploadOptions = options;
+
+                for await (const chunk of options.params.Body) {
+                    void chunk;
+                }
+
+                return {};
+            });
 
             await expect(
                 adapter.upload({
@@ -203,6 +219,9 @@ describe("S3StorageAdapter", () => {
             ).rejects.toMatchObject({
                 code: UploadErrorCode.STREAM_ERROR,
             });
+
+            expect(uploadOptions.abortController.signal.aborted).toBe(true);
+            expect(failingStream.destroyed).toBe(true);
         });
 
         it("should map S3 deletion failures to STORAGE_ERROR", async () => {
@@ -251,7 +270,8 @@ describe("S3StorageAdapter", () => {
             await expect(uploadPromise).rejects.toMatchObject({
                 code: UploadErrorCode.UPLOAD_ABORTED,
             });
+
+            expect(stream.destroyed).toBe(true);
         });
     });
-
 });

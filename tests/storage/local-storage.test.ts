@@ -256,25 +256,29 @@ describe("LocalStorageAdapter", () => {
         expect(content).toBe("existing content");
     });
 
-    // Test B: Destination fails after the file has opened.
-    it("should clean up a file when destination writing fails after opening", async () => {
+    // Destination failure after the file has opened.
+    it("should clean up the file and destroy the source when destination writing fails", async () => {
         const key = "destination-failure.txt";
 
         const failingStorage = new FailingWriteStorageAdapter({
             directory,
         });
 
-        await expect(
-            failingStorage.upload({
-                key,
-                stream: Readable.from([
-                    Buffer.alloc(1024 * 1024, "a"),
-                ]),
-                contentType: "text/plain",
-            }),
-        ).rejects.toMatchObject({
+        const source = new PassThrough();
+
+        const uploadPromise = failingStorage.upload({
+            key,
+            stream: source,
+            contentType: "text/plain",
+        });
+
+        source.write(Buffer.alloc(1024 * 1024, "a"));
+
+        await expect(uploadPromise).rejects.toMatchObject({
             code: UploadErrorCode.STORAGE_ERROR,
         });
+
+        expect(source.destroyed).toBe(true);
 
         await expect(
             stat(join(directory, key)),
