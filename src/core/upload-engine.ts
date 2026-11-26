@@ -230,12 +230,28 @@ export class UploadEngine {
             // 6. Store the validated stream.
             const key = `${id}.${detectedFile.extension}`;
 
-            const storedFile = await this.config.storage.upload({
-                key,
-                stream: validatedStream,
-                contentType: detectedFile.mimeType,
-                signal,
-            });
+            let storedFile;
+
+            try {
+                storedFile = await this.config.storage.upload({
+                    key,
+                    stream: validatedStream,
+                    contentType: detectedFile.mimeType,
+                    signal,
+                });
+            } catch (storageError) {
+                // Preserve errors already classified by the storage adapter.
+                if (storageError instanceof UploadError) {
+                    throw storageError;
+                }
+
+                // Raw errors from custom storage adapters are storage failures.
+                throw new UploadError({
+                    code: UploadErrorCode.STORAGE_ERROR,
+                    message: "Failed to store uploaded file",
+                    cause: storageError,
+                });
+            }
 
             // Track the stored file immediately after storage succeeds.
             storedKey = storedFile.key;
@@ -275,8 +291,12 @@ export class UploadEngine {
                     } catch (cleanupError) {
                         throw new UploadError({
                             code: UploadErrorCode.UPLOAD_ABORTED,
-                            message: "Upload was aborted, but stored file cleanup failed",
-                            cause: cleanupError,
+                            message:
+                                "Upload was aborted, but stored file cleanup failed",
+                            cause: new AggregateError(
+                                [abortError, cleanupError],
+                                "Upload abort and stored file cleanup both failed",
+                            ),
                         });
                     }
                 }

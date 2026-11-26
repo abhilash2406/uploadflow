@@ -304,7 +304,7 @@ describe("S3StorageAdapter", () => {
             null,
             undefined,
             {},
-            { pipe: () => {} },
+            { pipe: () => { } },
         ])("should reject an invalid readable stream: %s", async (stream) => {
             await expect(
                 adapter.upload({
@@ -526,6 +526,45 @@ describe("S3StorageAdapter", () => {
                 code: UploadErrorCode.UPLOAD_ABORTED,
             });
 
+            expect(stream.destroyed).toBe(true);
+        });
+
+        it("should disable retaining incomplete multipart uploads", async () => {
+            const controller = new AbortController();
+            const stream = new PassThrough();
+
+            let uploadOptions: any;
+
+            mocks.upload.mockImplementationOnce(async (options: any) => {
+                uploadOptions = options;
+
+                for await (const chunk of options.params.Body) {
+                    void chunk;
+                }
+
+                return {};
+            });
+
+            const uploadPromise = adapter.upload({
+                key: "documents/cancelled.txt",
+                stream,
+                contentType: "text/plain",
+                signal: controller.signal,
+            });
+
+            stream.write(Buffer.from("Hello"));
+
+            await vi.waitFor(() => {
+                expect(uploadOptions).toBeDefined();
+            });
+
+            controller.abort();
+
+            await expect(uploadPromise).rejects.toMatchObject({
+                code: UploadErrorCode.UPLOAD_ABORTED,
+            });
+
+            expect(uploadOptions.leavePartsOnError).toBe(false);
             expect(stream.destroyed).toBe(true);
         });
     });

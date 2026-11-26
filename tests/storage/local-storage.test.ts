@@ -42,6 +42,14 @@ class FailingWriteStorageAdapter extends LocalStorageAdapter {
     }
 }
 
+class FailingCleanupStorageAdapter extends LocalStorageAdapter {
+    protected override async removeFile(
+        _filePath: string,
+    ): Promise<void> {
+        throw new Error("Simulated cleanup failure");
+    }
+}
+
 describe("LocalStorageAdapter", () => {
     let directory: string;
     let outsideDirectory: string | undefined;
@@ -267,6 +275,62 @@ describe("LocalStorageAdapter", () => {
         });
     });
 
+    it("should report cleanup failure while preserving the original stream error", async () => {
+        const key = "cleanup-failure.txt";
+        const filePath = join(directory, key);
+
+        const failingStorage = new FailingCleanupStorageAdapter({
+            directory,
+        });
+
+        const source = new PassThrough();
+        const sourceError = new Error("Simulated source stream failure");
+
+        const uploadPromise = failingStorage.upload({
+            key,
+            stream: source,
+            contentType: "text/plain",
+        });
+
+        source.write(Buffer.alloc(1024 * 1024, "a"));
+
+        await vi.waitFor(async () => {
+            const fileStat = await stat(filePath);
+            expect(fileStat.size).toBeGreaterThan(0);
+        });
+
+        source.destroy(sourceError);
+
+        const uploadError: unknown = await uploadPromise.catch(
+            (error: unknown) => error,
+        );
+
+        expect(uploadError).toBeInstanceOf(UploadError);
+
+        if (!(uploadError instanceof UploadError)) {
+            throw uploadError;
+        }
+
+        expect(uploadError.code).toBe(UploadErrorCode.STREAM_ERROR);
+        expect(uploadError.cause).toBeInstanceOf(AggregateError);
+
+        if (!(uploadError.cause instanceof AggregateError)) {
+            throw uploadError.cause;
+        }
+
+        const aggregateError = uploadError.cause;
+
+        expect(aggregateError.errors).toHaveLength(2);
+        expect(aggregateError.errors[0]).toBe(sourceError);
+        expect(aggregateError.errors[1]).toMatchObject({
+            message: "Simulated cleanup failure",
+        });
+
+        // The simulated cleanup failure means the partial file remains.
+        // afterEach removes the temporary test directory.
+        await expect(stat(filePath)).resolves.toBeDefined();
+    });
+
     it("should clean up and report an aborted upload", async () => {
         const key = "aborted-upload.txt";
         const controller = new AbortController();
@@ -381,5 +445,22 @@ describe("LocalStorageAdapter", () => {
         await expect(
             storage.delete(null as never),
         ).rejects.toBeInstanceOf(UploadError);
+    });
+
+    it.each([
+        "file\u0000.txt",
+        "file\n.txt",
+        "file\r.txt",
+        "file\u007f.txt",
+    ])("should reject storage keys containing control characters: %s", async (key) => {
+        await expect(
+            storage.upload({
+                key,
+                stream: Readable.from(["Test"]),
+                contentType: "text/plain",
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.INVALID_FILE,
+        });
     });
 });
