@@ -40,6 +40,36 @@ describe("UploadEngine", () => {
         await rm(directory, { recursive: true, force: true });
     });
 
+    it("should reject invalid configuration during construction", () => {
+        expect(
+            () =>
+                new UploadEngine({
+                    maxFileSize: 0,
+                    allowedMimeTypes: ["image/jpeg"],
+                    storage: new LocalStorageAdapter({ directory }),
+                }),
+        ).toThrow(
+            expect.objectContaining({
+                code: UploadErrorCode.VALIDATION_ERROR,
+            }),
+        );
+    });
+
+    it("should reject an empty MIME allowlist during construction", () => {
+        expect(
+            () =>
+                new UploadEngine({
+                    maxFileSize: 1024 * 1024,
+                    allowedMimeTypes: [],
+                    storage: new LocalStorageAdapter({ directory }),
+                }),
+        ).toThrow(
+            expect.objectContaining({
+                code: UploadErrorCode.VALIDATION_ERROR,
+            }),
+        );
+    });
+
     it("should upload a valid JPEG successfully", async () => {
         const result = await engine.upload({
             filename: "photo.jpg",
@@ -212,10 +242,8 @@ describe("UploadEngine", () => {
 
         const abortingStorage: StorageAdapter = {
             upload: async (options) => {
-                // First, complete the actual storage operation.
                 const result = await localStorage.upload(options);
 
-                // Abort immediately after storage succeeds.
                 controller.abort();
 
                 return result;
@@ -240,7 +268,6 @@ describe("UploadEngine", () => {
             code: UploadErrorCode.UPLOAD_ABORTED,
         });
 
-        // The file must not remain in storage.
         expect(await readdir(directory)).toHaveLength(0);
     });
 
@@ -270,4 +297,140 @@ describe("UploadEngine", () => {
 
         expect(await readdir(directory)).toHaveLength(0);
     });
+
+
+    it("should reject missing upload input", async () => {
+        await expect(
+            engine.upload(undefined as never),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.VALIDATION_ERROR,
+        });
+    });
+
+    it("should reject an empty filename", async () => {
+        await expect(
+            engine.upload({
+                filename: "   ",
+                stream: Readable.from([jpeg]),
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.VALIDATION_ERROR,
+        });
+    });
+
+    it("should reject filenames containing control characters", async () => {
+        await expect(
+            engine.upload({
+                filename: "photo\u0000.jpg",
+                stream: Readable.from([jpeg]),
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.VALIDATION_ERROR,
+        });
+    });
+
+    it("should reject an invalid abort signal", async () => {
+        await expect(
+            engine.upload({
+                filename: "photo.jpg",
+                stream: Readable.from([jpeg]),
+                signal: {} as AbortSignal,
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.VALIDATION_ERROR,
+        });
+    });
+
+    it("should reject an invalid stream", async () => {
+        await expect(
+            engine.upload({
+                filename: "photo.jpg",
+                stream: {} as Readable,
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.VALIDATION_ERROR,
+        });
+    });
+
+
+
+    it("should clean up the source iterator only once when upload fails", async () => {
+        let returnCalls = 0;
+        let nextCalls = 0;
+
+        const source = {
+            destroyed: false,
+
+            destroy() {
+                this.destroyed = true;
+                return this;
+            },
+
+            [Symbol.asyncIterator]() {
+                return {
+                    async next() {
+                        nextCalls++;
+
+                        if (nextCalls === 1) {
+                            return {
+                                done: false as const,
+                                value: Buffer.concat([
+                                    jpeg,
+                                    Buffer.alloc(4100 - jpeg.length),
+                                ]),
+                            };
+                        }
+
+                        return {
+                            done: false as const,
+                            value: Buffer.alloc(1024),
+                        };
+                    },
+
+                    async return() {
+                        returnCalls++;
+
+                        return {
+                            done: true as const,
+                            value: undefined,
+                        };
+                    },
+                };
+            },
+        };
+
+        const failingStorage: StorageAdapter = {
+            upload: async (options) => {
+                // Start consuming the validated stream.
+                for await (const chunk of options.stream) {
+                    void chunk;
+                    break;
+                }
+
+                // Simulate a storage failure after consumption starts.
+                throw new Error("Simulated storage failure");
+            },
+            delete: async () => { },
+        };
+
+        const failingEngine = new UploadEngine({
+            maxFileSize: 1024 * 1024,
+            allowedMimeTypes: ["image/jpeg"],
+            storage: failingStorage,
+        });
+
+        await expect(
+            failingEngine.upload({
+                filename: "iterator-test.jpg",
+                stream: source as unknown as Readable,
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.STREAM_ERROR,
+        });
+
+        expect(returnCalls).toBe(1);
+    });
+
+
+
 });

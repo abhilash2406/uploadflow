@@ -1,5 +1,5 @@
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
     UploadEngine,
@@ -49,7 +49,9 @@ describe("Public API", () => {
 
     it("should allow creating an S3StorageAdapter", () => {
         const options: S3StorageOptions = {
-            client: null as never,
+            client: {
+                send: vi.fn(),
+            } as never,
             bucket: "test-bucket",
         };
 
@@ -80,7 +82,9 @@ describe("Public API", () => {
         };
 
         const s3Options: S3StorageOptions = {
-            client: null as never,
+            client: {
+                send: vi.fn(),
+            } as never,
             bucket: "test-bucket",
         };
 

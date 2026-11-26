@@ -15,6 +15,7 @@ import {
     rm,
     stat,
     writeFile,
+    symlink,
 } from "node:fs/promises";
 
 import { tmpdir } from "node:os";
@@ -43,6 +44,7 @@ class FailingWriteStorageAdapter extends LocalStorageAdapter {
 
 describe("LocalStorageAdapter", () => {
     let directory: string;
+    let outsideDirectory: string | undefined;
     let storage: LocalStorageAdapter;
 
     beforeEach(async () => {
@@ -57,6 +59,15 @@ describe("LocalStorageAdapter", () => {
                 recursive: true,
                 force: true,
             });
+        }
+
+        if (outsideDirectory) {
+            await rm(outsideDirectory, {
+                recursive: true,
+                force: true,
+            });
+
+            outsideDirectory = undefined;
         }
     });
 
@@ -116,6 +127,64 @@ describe("LocalStorageAdapter", () => {
                 contentType: "text/plain",
             }),
         ).rejects.toBeInstanceOf(UploadError);
+    });
+
+    it("should reject uploads through a directory symlink", async () => {
+        outsideDirectory = await mkdtemp(
+            join(tmpdir(), "uploadflow-outside-"),
+        );
+
+        const symlinkPath = join(directory, "linked");
+
+        await symlink(
+            outsideDirectory,
+            symlinkPath,
+            process.platform === "win32" ? "junction" : "dir",
+        );
+
+        await expect(
+            storage.upload({
+                key: "linked/escaped.txt",
+                stream: Readable.from(["Malicious content"]),
+                contentType: "text/plain",
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.INVALID_FILE,
+        });
+
+        await expect(
+            stat(join(outsideDirectory, "escaped.txt")),
+        ).rejects.toMatchObject({
+            code: "ENOENT",
+        });
+    });
+
+    it("should reject deletion through a directory symlink", async () => {
+        outsideDirectory = await mkdtemp(
+            join(tmpdir(), "uploadflow-outside-"),
+        );
+
+        const outsideFile = join(outsideDirectory, "important.txt");
+
+        await writeFile(outsideFile, "Do not delete");
+
+        const symlinkPath = join(directory, "linked");
+
+        await symlink(
+            outsideDirectory,
+            symlinkPath,
+            process.platform === "win32" ? "junction" : "dir",
+        );
+
+        await expect(
+            storage.delete("linked/important.txt"),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.INVALID_FILE,
+        });
+
+        await expect(
+            readFile(outsideFile, "utf8"),
+        ).resolves.toBe("Do not delete");
     });
 
     it("should not overwrite an existing file", async () => {
@@ -256,30 +325,61 @@ describe("LocalStorageAdapter", () => {
         expect(content).toBe("existing content");
     });
 
-    // Test B: Destination fails after the file has opened.
-    it("should clean up a file when destination writing fails after opening", async () => {
+    // Destination failure after the file has opened.
+    it("should clean up the file and destroy the source when destination writing fails", async () => {
         const key = "destination-failure.txt";
 
         const failingStorage = new FailingWriteStorageAdapter({
             directory,
         });
 
-        await expect(
-            failingStorage.upload({
-                key,
-                stream: Readable.from([
-                    Buffer.alloc(1024 * 1024, "a"),
-                ]),
-                contentType: "text/plain",
-            }),
-        ).rejects.toMatchObject({
+        const source = new PassThrough();
+
+        const uploadPromise = failingStorage.upload({
+            key,
+            stream: source,
+            contentType: "text/plain",
+        });
+
+        source.write(Buffer.alloc(1024 * 1024, "a"));
+
+        await expect(uploadPromise).rejects.toMatchObject({
             code: UploadErrorCode.STORAGE_ERROR,
         });
+
+        expect(source.destroyed).toBe(true);
 
         await expect(
             stat(join(directory, key)),
         ).rejects.toMatchObject({
             code: "ENOENT",
         });
+    });
+
+    it.each([
+        null,
+        undefined,
+        123,
+        {},
+        "",
+        ".",
+        "folder/../file.txt",
+        "folder/../../outside.txt",
+        String.raw`folder\..\file.txt`,
+        String.raw`folder\..\..\outside.txt`,
+    ])("should reject invalid storage keys: %s", async (key) => {
+        await expect(
+            storage.upload({
+                key: key as never,
+                stream: Readable.from(["Test"]),
+                contentType: "text/plain",
+            }),
+        ).rejects.toBeInstanceOf(UploadError);
+    });
+
+    it("should reject invalid keys when deleting files", async () => {
+        await expect(
+            storage.delete(null as never),
+        ).rejects.toBeInstanceOf(UploadError);
     });
 });

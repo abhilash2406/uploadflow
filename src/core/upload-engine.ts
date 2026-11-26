@@ -10,6 +10,9 @@ import type {
 
 import { validateFile } from "../validation/validation-engine.js";
 import { validateFileSize } from "../validation/size-validator.js";
+import { validateUploadConfig } from "../validation/config-validator.js";
+import { validateUploadInput } from "../validation/input-validator.js";
+
 import { UploadError } from "../errors/upload-error.js";
 import { UploadErrorCode } from "../errors/error-codes.js";
 
@@ -23,11 +26,18 @@ function createAbortError(): UploadError {
 }
 
 export class UploadEngine {
-    constructor(private readonly config: UploadConfig) {}
+    private readonly config: UploadConfig;
+
+    constructor(config: UploadConfig) {
+        validateUploadConfig(config);
+        this.config = config;
+    }
 
     async upload(input: UploadInput): Promise<UploadResult> {
+        // 1. Validate input before accessing the stream.
+        validateUploadInput(input);
+
         const id = randomUUID();
-        const iterator = input.stream[Symbol.asyncIterator]();
 
         const initialChunks: Buffer[] = [];
         let initialSize = 0;
@@ -38,6 +48,30 @@ export class UploadEngine {
 
         const signal = input.signal;
         const abortError = createAbortError();
+
+        let iterator:
+            ReturnType<Readable[typeof Symbol.asyncIterator]> | undefined;
+
+        // Track iterator cleanup to prevent duplicate return() calls.
+        let iteratorCleanupStarted = false;
+
+        const closeSourceIterator = async (): Promise<void> => {
+            if (
+                sourceEnded ||
+                iteratorCleanupStarted ||
+                !iterator?.return
+            ) {
+                return;
+            }
+
+            iteratorCleanupStarted = true;
+
+            try {
+                await iterator.return();
+            } catch {
+                // Preserve the original upload error.
+            }
+        };
 
         const handleAbort = () => {
             if (!input.stream.destroyed) {
@@ -50,13 +84,17 @@ export class UploadEngine {
         };
 
         try {
+            // 2. Create the iterator inside the try block.
+            const sourceIterator = input.stream[Symbol.asyncIterator]();
+            iterator = sourceIterator;
+
             if (signal?.aborted) {
                 throw abortError;
             }
 
             signal?.addEventListener("abort", handleAbort, { once: true });
 
-            // 1. Read only the initial bytes required for detection.
+            // 3. Read only the initial bytes required for detection.
             while (
                 initialSize < FILE_SIGNATURE_SIZE &&
                 !sourceEnded
@@ -65,7 +103,7 @@ export class UploadEngine {
                     throw abortError;
                 }
 
-                const next = await iterator.next();
+                const next = await sourceIterator.next();
 
                 if (signal?.aborted) {
                     throw abortError;
@@ -101,7 +139,7 @@ export class UploadEngine {
                 throw abortError;
             }
 
-            // 2. Detect actual file type and validate MIME.
+            // 4. Detect actual file type and validate MIME.
             const detectedFile = await validateFile(
                 Buffer.concat(initialChunks),
                 {
@@ -113,7 +151,7 @@ export class UploadEngine {
                 throw abortError;
             }
 
-            // 3. Replay inspected bytes and continue reading the source.
+            // 5. Replay inspected bytes and continue reading the source.
             const engine = this;
 
             async function* replayStream() {
@@ -155,7 +193,7 @@ export class UploadEngine {
                             throw abortError;
                         }
 
-                        const next = await iterator.next();
+                        const next = await sourceIterator.next();
 
                         if (signal?.aborted) {
                             throw abortError;
@@ -180,9 +218,7 @@ export class UploadEngine {
                         yield chunk;
                     }
                 } finally {
-                    if (!sourceEnded) {
-                        await iterator.return?.();
-                    }
+                    await closeSourceIterator();
                 }
             }
 
@@ -191,7 +227,7 @@ export class UploadEngine {
                 { objectMode: false },
             );
 
-            // 4. Store the validated stream.
+            // 6. Store the validated stream.
             const key = `${id}.${detectedFile.extension}`;
 
             const storedFile = await this.config.storage.upload({
@@ -208,7 +244,7 @@ export class UploadEngine {
                 throw abortError;
             }
 
-            // 5. Return upload metadata.
+            // 7. Return upload metadata.
             return {
                 id,
                 key: storedFile.key,
@@ -227,13 +263,8 @@ export class UploadEngine {
                 input.stream.destroy();
             }
 
-            if (!sourceEnded) {
-                try {
-                    await iterator.return?.();
-                } catch {
-                    // Preserve the original upload error.
-                }
-            }
+            // Close the source iterator only once.
+            await closeSourceIterator();
 
             // Clean up a file that was stored before the abort.
             if (signal?.aborted) {
