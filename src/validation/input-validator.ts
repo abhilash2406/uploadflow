@@ -35,12 +35,16 @@ export function validateUploadInput(input: UploadInput): void {
         });
     }
 
+    const signal: unknown = input.signal;
+
     if (
-        input.signal !== undefined &&
+        signal !== undefined &&
         (
-            typeof input.signal.aborted !== "boolean" ||
-            typeof input.signal.addEventListener !== "function" ||
-            typeof input.signal.removeEventListener !== "function"
+            signal === null ||
+            typeof signal !== "object" ||
+            typeof (signal as AbortSignal).aborted !== "boolean" ||
+            typeof (signal as AbortSignal).addEventListener !== "function" ||
+            typeof (signal as AbortSignal).removeEventListener !== "function"
         )
     ) {
         throw new UploadError({

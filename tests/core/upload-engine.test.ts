@@ -173,6 +173,32 @@ describe("UploadEngine", () => {
         expect(await readdir(directory)).toHaveLength(0);
     });
 
+    it("should accept a file exactly at the maximum size limit", async () => {
+        const maxSize = 5000;
+
+        const boundaryEngine = new UploadEngine({
+            maxFileSize: maxSize,
+            allowedMimeTypes: ["image/jpeg"],
+            storage: new LocalStorageAdapter({ directory }),
+        });
+
+        const initialChunk = Buffer.concat([
+            jpeg,
+            Buffer.alloc(4100 - jpeg.length),
+        ]);
+
+        const result = await boundaryEngine.upload({
+            filename: "boundary.jpg",
+            stream: Readable.from([
+                initialChunk,
+                Buffer.alloc(maxSize - initialChunk.length),
+            ]),
+        });
+
+        expect(result.status).toBe("completed");
+        expect(result.size).toBe(maxSize);
+    });
+
     it("should use detected MIME type instead of client MIME type", async () => {
         const result = await engine.upload({
             filename: "photo.jpg",
@@ -482,7 +508,7 @@ describe("UploadEngine", () => {
                 throw new Error("Simulated storage failure");
             },
 
-            delete: async () => {},
+            delete: async () => { },
         };
 
         const failingEngine = new UploadEngine({

@@ -446,4 +446,21 @@ describe("LocalStorageAdapter", () => {
             storage.delete(null as never),
         ).rejects.toBeInstanceOf(UploadError);
     });
+
+    it.each([
+        "file\u0000.txt",
+        "file\n.txt",
+        "file\r.txt",
+        "file\u007f.txt",
+    ])("should reject storage keys containing control characters: %s", async (key) => {
+        await expect(
+            storage.upload({
+                key,
+                stream: Readable.from(["Test"]),
+                contentType: "text/plain",
+            }),
+        ).rejects.toMatchObject({
+            code: UploadErrorCode.INVALID_FILE,
+        });
+    });
 });

@@ -34,9 +34,19 @@ describe("Public API", () => {
         expect(S3StorageAdapter).toBeDefined();
     });
 
-    it("should export UploadError and UploadErrorCode", () => {
+    it("should export UploadError and all error codes", () => {
         expect(UploadError).toBeDefined();
-        expect(UploadErrorCode.INVALID_FILE).toBe("INVALID_FILE");
+
+        expect(UploadErrorCode).toMatchObject({
+            INVALID_FILE: "INVALID_FILE",
+            FILE_TOO_LARGE: "FILE_TOO_LARGE",
+            UNSUPPORTED_FILE_TYPE: "UNSUPPORTED_FILE_TYPE",
+            VALIDATION_ERROR: "VALIDATION_ERROR",
+            STREAM_ERROR: "STREAM_ERROR",
+            STORAGE_ERROR: "STORAGE_ERROR",
+            UPLOAD_ABORTED: "UPLOAD_ABORTED",
+            INTERNAL_ERROR: "INTERNAL_ERROR",
+        });
     });
 
     it("should allow creating a LocalStorageAdapter", () => {

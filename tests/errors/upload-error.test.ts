@@ -48,4 +48,16 @@ describe("UploadError", () => {
 
     expect(error.cause).toBe(originalError);
   });
+
+  it("should preserve a non-Error cause", () => {
+    const originalCause = "Network timeout";
+
+    const error = new UploadError({
+      code: UploadErrorCode.STORAGE_ERROR,
+      message: "Upload failed",
+      cause: originalCause,
+    });
+
+    expect(error.cause).toBe(originalCause);
+  });
 });
