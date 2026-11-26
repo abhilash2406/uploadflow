@@ -127,6 +127,59 @@ describe("S3StorageAdapter", () => {
     });
 
     describe("validation", () => {
+        it("should reject missing constructor options", () => {
+            expect(() => {
+                new S3StorageAdapter(undefined as never);
+            }).toThrow("S3 storage options must be an object");
+        });
+
+        it("should reject a non-string bucket name", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: 123 as never,
+                });
+            }).toThrow("S3 bucket name cannot be empty");
+        });
+
+        it("should reject a missing S3 client", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client: null as never,
+                    bucket: "test-bucket",
+                });
+            }).toThrow("A valid S3 client must be provided");
+        });
+
+        it("should reject an S3 client without send()", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client: {} as S3Client,
+                    bucket: "test-bucket",
+                });
+            }).toThrow("A valid S3 client must be provided");
+        });
+
+        it("should reject an unsafe queue size", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: "test-bucket",
+                    queueSize: Number.MAX_SAFE_INTEGER + 1,
+                });
+            }).toThrow("S3 queue size must be a positive integer");
+        });
+
+        it("should reject an unsafe part size", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: "test-bucket",
+                    partSize: Number.MAX_SAFE_INTEGER + 1,
+                });
+            }).toThrow("S3 part size must be between 5 MiB and 5 GiB");
+        });
+
         it("should reject an empty bucket name", () => {
             expect(() => {
                 new S3StorageAdapter({
@@ -153,7 +206,157 @@ describe("S3StorageAdapter", () => {
                     bucket: "test-bucket",
                     partSize: 1024,
                 });
-            }).toThrow("S3 part size must be at least 5 MiB");
+            }).toThrow("S3 part size must be between 5 MiB and 5 GiB");
+        });
+
+        // Multipart memory configuration tests
+
+        it("should accept the default multipart memory configuration", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: "test-bucket",
+                });
+            }).not.toThrow();
+        });
+
+        it("should accept a custom multipart memory limit of 256 MiB", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: "test-bucket",
+                    queueSize: 4,
+                    partSize: 64 * 1024 * 1024,
+                    maxBufferedBytes: 256 * 1024 * 1024,
+                });
+            }).not.toThrow();
+        });
+
+        it("should reject a zero maxBufferedBytes value", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: "test-bucket",
+                    maxBufferedBytes: 0,
+                });
+            }).toThrow(
+                "S3 maxBufferedBytes must be a positive safe integer",
+            );
+        });
+
+        it("should reject an unsafe maxBufferedBytes value", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: "test-bucket",
+                    maxBufferedBytes: Number.MAX_SAFE_INTEGER + 1,
+                });
+            }).toThrow(
+                "S3 maxBufferedBytes must be a positive safe integer",
+            );
+        });
+
+        it("should reject multipart configuration exceeding the memory limit", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: "test-bucket",
+                    queueSize: 5,
+                    partSize: 32 * 1024 * 1024,
+                    maxBufferedBytes: 128 * 1024 * 1024,
+                });
+            }).toThrow(
+                "S3 multipart configuration exceeds maxBufferedBytes",
+            );
+        });
+
+        it("should reject multipart configuration exceeding the default memory limit", () => {
+            expect(() => {
+                new S3StorageAdapter({
+                    client,
+                    bucket: "test-bucket",
+                    queueSize: 4,
+                    partSize: 40 * 1024 * 1024,
+                });
+            }).toThrow(
+                "S3 multipart configuration exceeds maxBufferedBytes",
+            );
+        });
+
+        // Runtime upload input validation tests
+
+        it.each([
+            null,
+            undefined,
+            123,
+            "invalid",
+        ])("should reject invalid upload options: %s", async (options) => {
+            await expect(
+                adapter.upload(options as never),
+            ).rejects.toMatchObject({
+                code: UploadErrorCode.VALIDATION_ERROR,
+            });
+
+            expect(mocks.upload).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            null,
+            undefined,
+            {},
+            { pipe: () => {} },
+        ])("should reject an invalid readable stream: %s", async (stream) => {
+            await expect(
+                adapter.upload({
+                    key: "documents/test.txt",
+                    stream: stream as never,
+                    contentType: "text/plain",
+                }),
+            ).rejects.toMatchObject({
+                code: UploadErrorCode.VALIDATION_ERROR,
+            });
+
+            expect(mocks.upload).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            null,
+            undefined,
+            123,
+            "",
+            " ",
+            "text/plain\n",
+        ])("should reject an invalid content type: %s", async (contentType) => {
+            await expect(
+                adapter.upload({
+                    key: "documents/test.txt",
+                    stream: Readable.from(["Hello"]),
+                    contentType: contentType as never,
+                }),
+            ).rejects.toMatchObject({
+                code: UploadErrorCode.VALIDATION_ERROR,
+            });
+
+            expect(mocks.upload).not.toHaveBeenCalled();
+        });
+
+        it.each([
+            null,
+            {},
+            { aborted: false },
+        ])("should reject an invalid AbortSignal: %s", async (signal) => {
+            await expect(
+                adapter.upload({
+                    key: "documents/test.txt",
+                    stream: Readable.from(["Hello"]),
+                    contentType: "text/plain",
+                    signal: signal as never,
+                }),
+            ).rejects.toMatchObject({
+                code: UploadErrorCode.VALIDATION_ERROR,
+            });
+
+            expect(mocks.upload).not.toHaveBeenCalled();
         });
 
         it("should reject an empty object key", async () => {

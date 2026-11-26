@@ -20,12 +20,24 @@ import {
     UploadErrorCode,
 } from "../errors/index.js";
 
+const MIN_PART_SIZE = 5 * 1024 * 1024;
+const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_BUFFERED_BYTES = 128 * 1024 * 1024;
+
 export interface S3StorageOptions {
     client: S3Client;
     bucket: string;
     queueSize?: number;
     partSize?: number;
+    maxBufferedBytes?: number;
 }
+
+type S3UploadInput = {
+    key: string;
+    stream: Readable;
+    contentType: string;
+    signal?: AbortSignal;
+};
 
 function validateS3ObjectKey(
     key: unknown,
@@ -42,34 +54,139 @@ function validateS3ObjectKey(
     }
 }
 
+function validateS3UploadInput(
+    options: unknown,
+): asserts options is S3UploadInput {
+    if (!options || typeof options !== "object") {
+        throw new UploadError({
+            code: UploadErrorCode.VALIDATION_ERROR,
+            message: "S3 upload options must be an object",
+        });
+    }
+
+    const input = options as Record<string, unknown>;
+
+    validateS3ObjectKey(input.key);
+
+    const stream = input.stream;
+
+    if (
+        !stream ||
+        typeof stream !== "object" ||
+        typeof (stream as Readable).pipe !== "function" ||
+        typeof (stream as Readable).once !== "function" ||
+        typeof (stream as Readable).removeListener !== "function" ||
+        typeof (stream as Readable).destroy !== "function" ||
+        typeof (stream as Readable)[Symbol.asyncIterator] !== "function"
+    ) {
+        throw new UploadError({
+            code: UploadErrorCode.VALIDATION_ERROR,
+            message: "stream must be a valid readable Node.js stream",
+        });
+    }
+
+    if (
+        typeof input.contentType !== "string" ||
+        input.contentType.trim().length === 0 ||
+        /[\u0000-\u001f\u007f]/.test(input.contentType)
+    ) {
+        throw new UploadError({
+            code: UploadErrorCode.VALIDATION_ERROR,
+            message: "A valid content type must be provided",
+        });
+    }
+
+    const signal = input.signal;
+
+    if (
+        signal !== undefined &&
+        (
+            !signal ||
+            typeof signal !== "object" ||
+            typeof (signal as AbortSignal).aborted !== "boolean" ||
+            typeof (signal as AbortSignal).addEventListener !== "function" ||
+            typeof (signal as AbortSignal).removeEventListener !== "function"
+        )
+    ) {
+        throw new UploadError({
+            code: UploadErrorCode.VALIDATION_ERROR,
+            message: "signal must be a valid AbortSignal",
+        });
+    }
+}
+
 export class S3StorageAdapter implements StorageAdapter {
     private readonly client: S3Client;
     private readonly bucket: string;
     private readonly queueSize: number;
     private readonly partSize: number;
+    private readonly maxBufferedBytes: number;
 
     constructor(options: S3StorageOptions) {
-        if (!options.bucket.trim()) {
+        if (!options || typeof options !== "object") {
+            throw new UploadError({
+                code: UploadErrorCode.VALIDATION_ERROR,
+                message: "S3 storage options must be an object",
+            });
+        }
+
+        if (
+            typeof options.bucket !== "string" ||
+            options.bucket.trim().length === 0
+        ) {
             throw new UploadError({
                 code: UploadErrorCode.INVALID_FILE,
                 message: "S3 bucket name cannot be empty",
             });
         }
 
-        const queueSize = options.queueSize ?? 4;
-        const partSize = options.partSize ?? 5 * 1024 * 1024;
+        if (
+            !options.client ||
+            typeof options.client.send !== "function"
+        ) {
+            throw new UploadError({
+                code: UploadErrorCode.VALIDATION_ERROR,
+                message: "A valid S3 client must be provided",
+            });
+        }
 
-        if (!Number.isInteger(queueSize) || queueSize < 1) {
+        const queueSize = options.queueSize ?? 4;
+        const partSize = options.partSize ?? MIN_PART_SIZE;
+        const maxBufferedBytes =
+            options.maxBufferedBytes ?? DEFAULT_MAX_BUFFERED_BYTES;
+
+        if (!Number.isSafeInteger(queueSize) || queueSize < 1) {
             throw new UploadError({
                 code: UploadErrorCode.INVALID_FILE,
                 message: "S3 queue size must be a positive integer",
             });
         }
 
-        if (!Number.isInteger(partSize) || partSize < 5 * 1024 * 1024) {
+        if (
+            !Number.isSafeInteger(partSize) ||
+            partSize < MIN_PART_SIZE ||
+            partSize > MAX_PART_SIZE
+        ) {
             throw new UploadError({
                 code: UploadErrorCode.INVALID_FILE,
-                message: "S3 part size must be at least 5 MiB",
+                message: "S3 part size must be between 5 MiB and 5 GiB",
+            });
+        }
+
+        if (
+            !Number.isSafeInteger(maxBufferedBytes) ||
+            maxBufferedBytes < 1
+        ) {
+            throw new UploadError({
+                code: UploadErrorCode.INVALID_FILE,
+                message: "S3 maxBufferedBytes must be a positive safe integer",
+            });
+        }
+
+        if (queueSize > Math.floor(maxBufferedBytes / partSize)) {
+            throw new UploadError({
+                code: UploadErrorCode.INVALID_FILE,
+                message: "S3 multipart configuration exceeds maxBufferedBytes",
             });
         }
 
@@ -77,6 +194,7 @@ export class S3StorageAdapter implements StorageAdapter {
         this.bucket = options.bucket;
         this.queueSize = queueSize;
         this.partSize = partSize;
+        this.maxBufferedBytes = maxBufferedBytes;
     }
 
     async upload(options: {
@@ -85,9 +203,9 @@ export class S3StorageAdapter implements StorageAdapter {
         contentType: string;
         signal?: AbortSignal;
     }): Promise<StoredFile> {
-        const { key, stream, contentType, signal } = options;
+        validateS3UploadInput(options);
 
-        validateS3ObjectKey(key);
+        const { key, stream, contentType, signal } = options;
 
         if (signal?.aborted) {
             throw new UploadError({
@@ -103,7 +221,11 @@ export class S3StorageAdapter implements StorageAdapter {
         const controller = new AbortController();
 
         const handleSourceError = (error: Error) => {
-            if (!failureOrigin && !controller.signal.aborted && !signal?.aborted) {
+            if (
+                !failureOrigin &&
+                !controller.signal.aborted &&
+                !signal?.aborted
+            ) {
                 failureOrigin = "source";
                 failureCause = error;
             }
@@ -142,7 +264,11 @@ export class S3StorageAdapter implements StorageAdapter {
             });
 
             const uploadPromise = upload.done().catch((error) => {
-                if (!failureOrigin && !controller.signal.aborted && !signal?.aborted) {
+                if (
+                    !failureOrigin &&
+                    !controller.signal.aborted &&
+                    !signal?.aborted
+                ) {
                     failureOrigin = "storage";
                     failureCause = error;
                 }
@@ -155,7 +281,11 @@ export class S3StorageAdapter implements StorageAdapter {
                 counter,
                 { signal: controller.signal },
             ).catch((error) => {
-                if (!failureOrigin && !controller.signal.aborted && !signal?.aborted) {
+                if (
+                    !failureOrigin &&
+                    !controller.signal.aborted &&
+                    !signal?.aborted
+                ) {
                     failureOrigin = "source";
                     failureCause = error;
                 }
