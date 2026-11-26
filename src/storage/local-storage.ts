@@ -107,38 +107,73 @@ export class LocalStorageAdapter implements StorageAdapter {
                 size,
             };
         } catch (error) {
+            let cleanupError: unknown;
+
             // Never delete an existing file if creation failed.
             if (fileCreated) {
-                await rm(filePath, { force: true }).catch(() => undefined);
+                try {
+                    await this.removeFile(filePath);
+                } catch (error) {
+                    cleanupError = error;
+                }
             }
+
+            // Preserve both the original failure and cleanup failure.
+            const originalCause =
+                failureOrigin === "source"
+                    ? failureCause ?? error
+                    : error;
+
+            const cause =
+                cleanupError !== undefined
+                    ? new AggregateError(
+                          [originalCause, cleanupError],
+                          "Upload failed and partial file cleanup also failed",
+                      )
+                    : originalCause;
 
             // Cancellation takes priority.
             if (signal?.aborted) {
                 throw new UploadError({
                     code: UploadErrorCode.UPLOAD_ABORTED,
-                    message: "Upload was aborted",
-                    cause: error,
+                    message: cleanupError
+                        ? "Upload was aborted, but partial file cleanup failed"
+                        : "Upload was aborted",
+                    cause,
                 });
             }
 
-            // Preserve existing UploadError codes.
+            // Preserve existing UploadError classifications.
             if (error instanceof UploadError) {
-                throw error;
+                if (cleanupError === undefined) {
+                    throw error;
+                }
+
+                throw new UploadError({
+                    code: error.code,
+                    message: error.message,
+                    retryable: error.retryable,
+                    cause,
+                });
             }
 
             // Classify the original failure.
             if (failureOrigin === "source") {
                 throw new UploadError({
                     code: UploadErrorCode.STREAM_ERROR,
-                    message: "Failed to read the incoming upload stream",
-                    cause: failureCause ?? error,
+                    message: cleanupError
+                        ? "Failed to read the incoming upload stream and clean up the partial file"
+                        : "Failed to read the incoming upload stream",
+                    cause,
                 });
             }
 
             throw new UploadError({
                 code: UploadErrorCode.STORAGE_ERROR,
-                message: "Failed to store file locally",
-                cause: failureCause ?? error,
+                message: cleanupError
+                    ? "Failed to store file locally and clean up the partial file"
+                    : "Failed to store file locally",
+                cause,
             });
         } finally {
             stream.removeListener("error", handleSourceError);
@@ -153,6 +188,14 @@ export class LocalStorageAdapter implements StorageAdapter {
         filePath: string,
     ): ReturnType<typeof createWriteStream> {
         return createWriteStream(filePath, { flags: "wx" });
+    }
+
+    /**
+     * Removes a partially written file.
+     * Protected so tests can simulate cleanup failures.
+     */
+    protected async removeFile(filePath: string): Promise<void> {
+        await rm(filePath, { force: true });
     }
 
     async delete(key: string): Promise<void> {
@@ -261,7 +304,7 @@ export class LocalStorageAdapter implements StorageAdapter {
             });
         }
 
-        // 2. Reject path traversal segments.
+        // Reject path traversal segments.
         const segments = key.split(/[\\/]+/);
 
         if (segments.some((segment) => segment === "..")) {

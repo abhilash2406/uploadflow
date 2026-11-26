@@ -14,6 +14,7 @@ describe("UploadError", () => {
     expect(error).toBeInstanceOf(Error);
     expect(error).toBeInstanceOf(UploadError);
     expect(error.name).toBe("UploadError");
+    expect(error.message).toBe("File exceeds maximum size");
     expect(error.code).toBe("FILE_TOO_LARGE");
   });
 

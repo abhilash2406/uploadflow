@@ -1,13 +1,30 @@
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import {
+    afterEach,
+    beforeEach,
+    describe,
+    expect,
+    it,
+} from "vitest";
+
+import {
+    mkdtemp,
+    readFile,
+    readdir,
+    rm,
+} from "node:fs/promises";
+
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 
 import { UploadEngine } from "../../src/core/upload-engine.js";
 import { LocalStorageAdapter } from "../../src/storage/local-storage.js";
-import { UploadErrorCode } from "../../src/errors/error-codes.js";
+import {
+    UploadError,
+    UploadErrorCode,
+} from "../../src/errors/index.js";
+
 import type { StorageAdapter } from "../../src/types/storage.js";
 
 describe("UploadEngine", () => {
@@ -271,6 +288,65 @@ describe("UploadEngine", () => {
         expect(await readdir(directory)).toHaveLength(0);
     });
 
+    it("should preserve abort and storage cleanup errors when deleting the stored file fails", async () => {
+        const controller = new AbortController();
+        const cleanupError = new Error("Simulated storage cleanup failure");
+
+        const localStorage = new LocalStorageAdapter({ directory });
+
+        const failingCleanupStorage: StorageAdapter = {
+            upload: async (options) => {
+                const result = await localStorage.upload(options);
+
+                controller.abort();
+
+                return result;
+            },
+
+            delete: async () => {
+                throw cleanupError;
+            },
+        };
+
+        const raceEngine = new UploadEngine({
+            maxFileSize: 1024 * 1024,
+            allowedMimeTypes: ["image/jpeg"],
+            storage: failingCleanupStorage,
+        });
+
+        const uploadError: unknown = await raceEngine.upload({
+            filename: "cleanup-failure.jpg",
+            stream: Readable.from([jpeg]),
+            signal: controller.signal,
+        }).catch((error: unknown) => error);
+
+        expect(uploadError).toBeInstanceOf(UploadError);
+
+        if (!(uploadError instanceof UploadError)) {
+            throw uploadError;
+        }
+
+        expect(uploadError.code).toBe(UploadErrorCode.UPLOAD_ABORTED);
+        expect(uploadError.cause).toBeInstanceOf(AggregateError);
+
+        if (!(uploadError.cause instanceof AggregateError)) {
+            throw uploadError.cause;
+        }
+
+        const aggregateError = uploadError.cause;
+
+        expect(aggregateError.errors).toHaveLength(2);
+
+        expect(aggregateError.errors[0]).toMatchObject({
+            code: UploadErrorCode.UPLOAD_ABORTED,
+        });
+
+        expect(aggregateError.errors[1]).toBe(cleanupError);
+
+        // Deletion failed, so the original stored file remains.
+        expect(await readdir(directory)).toHaveLength(1);
+    });
+
     it("should clean up partial files when size limit is exceeded during streaming", async () => {
         const smallLimitEngine = new UploadEngine({
             maxFileSize: 5000,
@@ -297,7 +373,6 @@ describe("UploadEngine", () => {
 
         expect(await readdir(directory)).toHaveLength(0);
     });
-
 
     it("should reject missing upload input", async () => {
         await expect(
@@ -352,8 +427,6 @@ describe("UploadEngine", () => {
         });
     });
 
-
-
     it("should clean up the source iterator only once when upload fails", async () => {
         let returnCalls = 0;
         let nextCalls = 0;
@@ -401,16 +474,15 @@ describe("UploadEngine", () => {
 
         const failingStorage: StorageAdapter = {
             upload: async (options) => {
-                // Start consuming the validated stream.
                 for await (const chunk of options.stream) {
                     void chunk;
                     break;
                 }
 
-                // Simulate a storage failure after consumption starts.
                 throw new Error("Simulated storage failure");
             },
-            delete: async () => { },
+
+            delete: async () => {},
         };
 
         const failingEngine = new UploadEngine({
@@ -425,12 +497,9 @@ describe("UploadEngine", () => {
                 stream: source as unknown as Readable,
             }),
         ).rejects.toMatchObject({
-            code: UploadErrorCode.STREAM_ERROR,
+            code: UploadErrorCode.STORAGE_ERROR,
         });
 
         expect(returnCalls).toBe(1);
     });
-
-
-
 });
