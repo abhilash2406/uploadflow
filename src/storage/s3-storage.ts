@@ -6,7 +6,7 @@ import {
 
 import { Upload } from "@aws-sdk/lib-storage";
 
-import type { Readable, } from "node:stream";
+import type { Readable } from "node:stream";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -25,6 +25,21 @@ export interface S3StorageOptions {
     bucket: string;
     queueSize?: number;
     partSize?: number;
+}
+
+function validateS3ObjectKey(
+    key: unknown,
+): asserts key is string {
+    if (
+        typeof key !== "string" ||
+        key.trim().length === 0 ||
+        /[\u0000-\u001f\u007f]/.test(key)
+    ) {
+        throw new UploadError({
+            code: UploadErrorCode.INVALID_FILE,
+            message: "Invalid S3 object key",
+        });
+    }
 }
 
 export class S3StorageAdapter implements StorageAdapter {
@@ -72,12 +87,7 @@ export class S3StorageAdapter implements StorageAdapter {
     }): Promise<StoredFile> {
         const { key, stream, contentType, signal } = options;
 
-        if (!key.trim()) {
-            throw new UploadError({
-                code: UploadErrorCode.INVALID_FILE,
-                message: "Invalid S3 object key",
-            });
-        }
+        validateS3ObjectKey(key);
 
         if (signal?.aborted) {
             throw new UploadError({
@@ -202,12 +212,7 @@ export class S3StorageAdapter implements StorageAdapter {
     }
 
     async delete(key: string): Promise<void> {
-        if (!key.trim()) {
-            throw new UploadError({
-                code: UploadErrorCode.INVALID_FILE,
-                message: "Invalid S3 object key",
-            });
-        }
+        validateS3ObjectKey(key);
 
         try {
             await this.client.send(

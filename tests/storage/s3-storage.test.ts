@@ -105,6 +105,25 @@ describe("S3StorageAdapter", () => {
                 Key: "documents/test.txt",
             });
         });
+
+        it.each([
+            null,
+            undefined,
+            123,
+            {},
+            "",
+            " ",
+            "documents/\0test.txt",
+            "documents/\ntest.txt",
+        ])("should reject invalid object keys when deleting: %s", async (key) => {
+            await expect(
+                adapter.delete(key as never),
+            ).rejects.toMatchObject({
+                code: UploadErrorCode.INVALID_FILE,
+            });
+
+            expect(send).not.toHaveBeenCalled();
+        });
     });
 
     describe("validation", () => {
@@ -141,6 +160,39 @@ describe("S3StorageAdapter", () => {
             await expect(
                 adapter.upload({
                     key: " ",
+                    stream: Readable.from(["Hello"]),
+                    contentType: "text/plain",
+                }),
+            ).rejects.toMatchObject({
+                code: UploadErrorCode.INVALID_FILE,
+            });
+        });
+
+        it.each([
+            null,
+            undefined,
+            123,
+            {},
+        ])("should reject invalid object key types: %s", async (key) => {
+            await expect(
+                adapter.upload({
+                    key: key as never,
+                    stream: Readable.from(["Hello"]),
+                    contentType: "text/plain",
+                }),
+            ).rejects.toMatchObject({
+                code: UploadErrorCode.INVALID_FILE,
+            });
+        });
+
+        it.each([
+            "documents/\0test.txt",
+            "documents/\ntest.txt",
+            "documents/\rtest.txt",
+        ])("should reject object keys containing control characters", async (key) => {
+            await expect(
+                adapter.upload({
+                    key,
                     stream: Readable.from(["Hello"]),
                     contentType: "text/plain",
                 }),

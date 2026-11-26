@@ -1,6 +1,11 @@
 
 import { createWriteStream } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import {
+    mkdir,
+    rm,
+    lstat,
+    realpath,
+} from "node:fs/promises";
 import {
     resolve,
     relative,
@@ -67,27 +72,36 @@ export class LocalStorageAdapter implements StorageAdapter {
         let output: ReturnType<typeof createWriteStream> | undefined;
 
         try {
-            // 1. Create parent directories.
+            // 1. Ensure the storage root exists.
+            await mkdir(this.directory, { recursive: true });
+
+            // 2. Reject existing symlink directories.
+            await this.assertNoSymlinkDirectories(filePath);
+
+            // 3. Create parent directories.
             await mkdir(dirname(filePath), { recursive: true });
 
-            // 2. Create the destination file without overwriting.
+            // 4. Verify the resolved parent is inside storage.
+            await this.assertSafeDestination(filePath);
+
+            // 5. Create the destination file without overwriting.
             output = this.createOutputStream(filePath);
 
             output.once("open", () => {
                 fileCreated = true;
             });
 
-            // 3. Track errors from their original sources.
+            // 6. Track errors from their original sources.
             stream.on("error", handleSourceError);
 
             output.on("error", (error) => {
                 captureFailure("storage", error);
             });
 
-            // 4. Stream the file to disk.
+            // 7. Stream the file to disk.
             await pipeline(stream, counter, output, { signal });
 
-            // 5. Return stored file information.
+            // 8. Return stored file information.
             return {
                 key,
                 size,
@@ -145,8 +159,18 @@ export class LocalStorageAdapter implements StorageAdapter {
         const filePath = this.resolvePath(key);
 
         try {
+            // Reject symlink directories before deleting.
+            await this.assertNoSymlinkDirectories(filePath);
+
+            // Verify the resolved parent remains inside storage.
+            await this.assertSafeDestination(filePath);
+
             await rm(filePath);
         } catch (error) {
+            if (error instanceof UploadError) {
+                throw error;
+            }
+
             throw new UploadError({
                 code: UploadErrorCode.STORAGE_ERROR,
                 message: "Failed to delete stored file",
@@ -155,12 +179,102 @@ export class LocalStorageAdapter implements StorageAdapter {
         }
     }
 
+    /**
+     * Checks existing parent directory components for symlinks.
+     */
+    private async assertNoSymlinkDirectories(
+        filePath: string,
+    ): Promise<void> {
+        const parentPath = dirname(filePath);
+        const relativeParent = relative(this.directory, parentPath);
+
+        let currentPath = this.directory;
+
+        for (const segment of relativeParent.split(sep).filter(Boolean)) {
+            currentPath = resolve(currentPath, segment);
+
+            try {
+                const stats = await lstat(currentPath);
+
+                if (stats.isSymbolicLink() || !stats.isDirectory()) {
+                    throw new UploadError({
+                        code: UploadErrorCode.INVALID_FILE,
+                        message:
+                            "Storage path contains an invalid directory or symbolic link",
+                    });
+                }
+            } catch (error) {
+                if (error instanceof UploadError) {
+                    throw error;
+                }
+
+                if (
+                    error instanceof Error &&
+                    "code" in error &&
+                    error.code === "ENOENT"
+                ) {
+                    return;
+                }
+
+                throw error;
+            }
+        }
+    }
+
+    /**
+     * Verifies the real destination parent remains inside
+     * the real storage directory.
+     */
+    private async assertSafeDestination(
+        filePath: string,
+    ): Promise<void> {
+        const realStorageDirectory = await realpath(this.directory);
+        const realParentDirectory = await realpath(dirname(filePath));
+
+        const relativeParent = relative(
+            realStorageDirectory,
+            realParentDirectory,
+        );
+
+        if (
+            relativeParent === ".." ||
+            relativeParent.startsWith(`..${sep}`) ||
+            isAbsolute(relativeParent)
+        ) {
+            throw new UploadError({
+                code: UploadErrorCode.INVALID_FILE,
+                message:
+                    "Storage destination escapes the configured directory",
+            });
+        }
+    }
+
     private resolvePath(key: string): string {
+        if (
+            typeof key !== "string" ||
+            key.trim().length === 0 ||
+            /[\u0000-\u001f\u007f]/.test(key)
+        ) {
+            throw new UploadError({
+                code: UploadErrorCode.INVALID_FILE,
+                message: "Invalid storage key",
+            });
+        }
+
+        // 2. Reject path traversal segments.
+        const segments = key.split(/[\\/]+/);
+
+        if (segments.some((segment) => segment === "..")) {
+            throw new UploadError({
+                code: UploadErrorCode.INVALID_FILE,
+                message: "Invalid storage key",
+            });
+        }
+
         const filePath = resolve(this.directory, key);
         const relativePath = relative(this.directory, filePath);
 
         if (
-            !key ||
             relativePath === "" ||
             relativePath === "." ||
             isAbsolute(relativePath) ||
